@@ -13,6 +13,7 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import ExponentialLR
 from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
+from torch.nn.utils import clip_grad_norm
 
 from common.utils import get_model_class
 
@@ -25,13 +26,12 @@ class DALLE(ABC):
             self.parser.add_argument('--vae_weights_fpath', type=str, required=True)
             self.parser.add_argument('--batch_size', type=int, required=True)
             self.parser.add_argument('--learning_rate', type=float, required=True)
-            self.parser.add_argument('--num_text_tokens', type=int, required=True)
-            self.parser.add_argument('--text_seq_len', type=int, required=True)
             self.parser.add_argument('--dim', type=int, required=True)
             self.parser.add_argument('--depth', type=int, required=True)
             self.parser.add_argument('--heads', type=int, required=True)
             self.parser.add_argument('--dim_head', type=int, required=True)
             self.parser.add_argument('--reversible', default=False, action='store_true')
+            self.parser.add_argument('--clip_grad_norm', type=float, required=True)
             self.parser.add_argument('--num_workers', type=int, required=True)
             self.parser.add_argument('--log_tier1_interval', type=int, required=True)
             self.parser.add_argument('--log_tier2_interval', type=int, required=True)
@@ -50,7 +50,7 @@ class DALLE(ABC):
 
         self.model = DALLE_MODEL(
             vae=self.vae,
-            num_text_tokens=self.params.num_text_tokens,
+            num_text_tokens=self.params.vocab_size,
             text_seq_len=self.params.text_seq_len,
             dim=self.params.dim,
             depth=self.params.depth,
@@ -89,13 +89,22 @@ class DALLE(ABC):
             logging.info(f'Starting epoch {epoch}')
             for i, data in enumerate(data_loader):
                 images = data['image'].cuda()
-                loss, recons = self.model(images, return_loss=True, return_recons=True, temp=temp)
-                self.optimizer.zero_grad()
+                captions = data['caption'].cuda()
+                masks = data['mask'].cuda()
+                loss = self.model(captions,
+                                  images,
+                                  mask=masks,
+                                  return_loss=True)
+
                 loss.backward()
+                clip_grad_norm(self.model.parameters(), self.params.clip_grad_norm)
                 self.optimizer.step()
+                self.optimizer.zero_grad()
+
                 if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
-                    logs = self.log_train(loss, recons, images, i, epoch)
+                    logs = self.log_train(loss, captions, masks, dataset.tokenizer, i, epoch)
                     wandb.log(logs)
+                    pass
 
                 step += 1
             logging.info(f'Finished epoch {epoch}')
@@ -119,35 +128,32 @@ class DALLE(ABC):
 
         return optimizer
 
-    def log_train(self, loss, recons, train_images, step, epoch):
+    def log_train(self, loss, train_texts, train_masks, tokenizer, step, epoch):
         logs = {}
         if step % self.params.log_tier2_interval == 0:
+            sample_text = train_texts[:1]
+            token_list = sample_text.masked_select(sample_text != 0).tolist()
+            decoded_text = tokenizer.decode(token_list)
+
             with torch.no_grad():
-                codes = self.model.get_codebook_indices(train_images[:self.params.num_images_save])
-                hard_recons = self.model.decode(codes)
-            images, recons = train_images[:self.params.num_images_save], recons[:self.params.num_images_save]
-            images, recons, hard_recons, codes = map(lambda t: t.detach().cpu(), (images, recons, hard_recons, codes))
-            images, recons, hard_recons = map(
-                lambda t: make_grid(t.float(), nrow=int(math.sqrt(self.params.num_images_save)), normalize=True, range=(-1, 1)),
-                (images, recons, hard_recons))
+                image = self.model.generate_images(
+                    sample_text,
+                    mask=train_masks[:1],
+                    filter_thres=0.9
+                )
 
             logs = {
                 **logs,
-                'sample images': wandb.Image(images, caption='original images'),
-                'reconstructions': wandb.Image(recons, caption='reconstructions'),
-                'hard reconstructions': wandb.Image(hard_recons, caption='hard reconstructions'),
-                'codebook_indices': wandb.Histogram(codes)
+                'image': wandb.Image(image, caption=decoded_text)
             }
 
         if step % self.params.log_tier1_interval == 0:
-            lr = self.schedule.get_last_lr()[0]
-            logging.info(f'Epoch:{epoch} Step:{step} loss:{loss.item()} lr:{lr}')
+            logging.info(f'Epoch:{epoch} Step:{step} loss:{loss.item()}')
             logs = {
                 **logs,
                 'epoch': epoch,
                 'step': step,
-                'loss': loss.item(),
-                'lr': lr
+                'loss': loss.item()
             }
 
         if step % self.params.save_interval == 0:
@@ -155,6 +161,6 @@ class DALLE(ABC):
                 save_obj = {
                     'weights': self.model.state_dict()
                 }
-                torch.save(save_obj, f'{self.params.experiment_dpath}/vae_{step}.pt')
+                torch.save(save_obj, f'{self.params.experiment_dpath}/vae_{epoch}_{step}.pt')
 
         return logs

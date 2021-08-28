@@ -13,6 +13,7 @@ import horovod.torch as hvd
 import numpy as np
 import torch
 from filelock import FileLock
+import torch
 
 random.seed(1334)
 np.random.seed(1334)
@@ -84,6 +85,7 @@ def get_dataset_class(cmd, copy=True):
 
 
 if __name__ == '__main__':
+    torch.cuda.empty_cache()
     parser = get_args_parser()
     cmd, other_args = parser.parse_known_args()
 

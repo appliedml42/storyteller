@@ -1,12 +1,12 @@
 import argparse
-from argparse import Namespace
-import logging
 import os
+from argparse import Namespace
 
 import pandas as pd
 import requests
 import torch
 from PIL import Image
+from dalle_pytorch.tokenizer import tokenizer
 from torch.utils.data import Dataset
 from torchvision import transforms as T
 
@@ -19,18 +19,21 @@ class ConceptualCaptionsWeb(Dataset):
             if generic_args.which == 'train':
                 self.parser.add_argument('--dpath', type=str, required=True)
                 self.parser.add_argument('--image_size', type=int, required=True)
+                self.parser.add_argument('--text_seq_len', type=int, required=True)
             self.params, _ = self.parser.parse_known_args(other_args, namespace=generic_args)
+            self.params.vocab_size = tokenizer.vocab_size
             self._initialize()
         elif isinstance(args[0], Namespace):
             self.params = args[0]
             self._initialize()
 
     def _initialize(self):
-        self.dataset = pd.read_csv(os.path.join(self.params.fpath, 'Train_GCC-training.tsv'),
+        self.dataset = pd.read_csv(os.path.join(self.params.dpath, 'Train_GCC-training.tsv'),
                                    sep='\t',
                                    names=['caption', 'url'],
-                                   header=None)
+                                   header=None).reset_index()
         self.image_size = self.params.image_size
+        self.tokenizer = tokenizer
         self.transform = T.Compose([
             T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
             T.Resize(self.image_size),
@@ -46,33 +49,35 @@ class ConceptualCaptionsWeb(Dataset):
         try:
             with requests.get(url, timeout=2, stream=True) as response:
                 if response.status_code == 200:
-                    return Image.open(bytearray(response.content))
+                    return Image.open(response.raw)
                 else:
                     return None
         except Exception as e:
-            logging.error(e)
             return None
+
+    def _tokenize(self, text):
+        return tokenizer.tokenize(text,
+                                  self.params.text_seq_len)
 
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        caption = self.dataset.iloc[:, idx[0]]
-        img_url = self.dataset.iloc[:, idx[1]]
+        caption = self.dataset.iloc[idx, 1]
+        img_url = self.dataset.iloc[idx, 2]
         img = ConceptualCaptionsWeb._download_image(img_url)
 
         # If retrieval of image from original index failed replace with random sample.
         while img is None:
             img = ConceptualCaptionsWeb._download_image(img_url)
             rand_sample = self.dataset.sample()
-            caption = rand_sample['caption']
-            img_url = rand_sample['url']
+            caption = rand_sample['caption'].values[0]
+            img_url = rand_sample['url'].values[0]
 
         img = self.transform(img)
+        caption = self._tokenize(caption).squeeze(0)
         return {
             'image': img,
-            'caption': caption
+            'caption': caption,
+            'mask': caption != 0
         }
-
-
-ds = ConceptualCaptionsWeb
