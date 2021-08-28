@@ -8,8 +8,6 @@ from torchvision import transforms as T
 
 
 class ConceptualCaptions(Dataset):
-    """Face Landmarks dataset."""
-
     def __init__(self, generic_args, other_args):
         self.parser = argparse.ArgumentParser()
         if generic_args.which == 'train':
