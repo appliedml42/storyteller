@@ -69,15 +69,17 @@ class DALLE(ABC):
 
     def train(self, dataset):
         sampler = None
+        shuffle = True
         if self.params.use_horovod:
             sampler = torch.utils.data.DistributedSampler(dataset, num_replicas=hvd.size(), rank=hvd.rank())
+            shuffle = False
 
         data_loader = DataLoader(dataset,
                                  batch_size=self.params.batch_size,
                                  sampler=sampler,
                                  num_workers=self.params.num_workers,
                                  prefetch_factor=self.params.prefetch_factor,
-                                 shuffle=True)
+                                 shuffle=shuffle)
 
         step = 0
         exp_config = vars(self.params)
