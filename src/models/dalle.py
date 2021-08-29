@@ -1,7 +1,7 @@
 import argparse
 import json
 import logging
-import math
+import time
 from abc import ABC
 from argparse import Namespace
 
@@ -9,11 +9,10 @@ import horovod.torch as hvd
 import torch
 import wandb
 from dalle_pytorch import DALLE as DALLE_MODEL
-from torch.optim import Adam
-from torch.optim.lr_scheduler import ExponentialLR
-from torch.utils.data import DataLoader
-from torchvision.utils import make_grid
+from dalle_pytorch import VQGanVAE
 from torch.nn.utils import clip_grad_norm
+from torch.optim import Adam
+from torch.utils.data import DataLoader
 
 from common.utils import get_model_class
 
@@ -22,8 +21,8 @@ class DALLE(ABC):
     def __init__(self, generic_args, other_args):
         self.parser = argparse.ArgumentParser()
         if generic_args.which == 'train':
-            self.parser.add_argument('--vae_config_fpath', type=str, required=True)
-            self.parser.add_argument('--vae_weights_fpath', type=str, required=True)
+            self.parser.add_argument('--vae_config_fpath', type=str, required=False, default=None)
+            self.parser.add_argument('--vae_weights_fpath', type=str, required=False, default=None)
             self.parser.add_argument('--batch_size', type=int, required=True)
             self.parser.add_argument('--learning_rate', type=float, required=True)
             self.parser.add_argument('--dim', type=int, required=True)
@@ -33,20 +32,25 @@ class DALLE(ABC):
             self.parser.add_argument('--reversible', default=False, action='store_true')
             self.parser.add_argument('--clip_grad_norm', type=float, required=True)
             self.parser.add_argument('--num_workers', type=int, required=True)
+            self.parser.add_argument('--prefetch_factor', type=int, required=True)
+            self.parser.add_argument('--cache_duration', type=int, required=True)
             self.parser.add_argument('--log_tier1_interval', type=int, required=True)
             self.parser.add_argument('--log_tier2_interval', type=int, required=True)
             self.parser.add_argument('--save_interval', type=int, required=True)
 
         self.params, _ = self.parser.parse_known_args(other_args, namespace=generic_args)
 
-        with open(self.params.vae_config_fpath) as reader:
-            experiment_configuration = Namespace(**json.load(reader))
-            model_class = get_model_class(experiment_configuration, False)
-            experiment_configuration.use_horovod = False
-            model = model_class(experiment_configuration)
-            self.vae = model.model
-            weights = torch.load(self.params.vae_weights_fpath)['weights']
-            self.vae.load_state_dict(weights)
+        if self.params.vae_config_fpath is None:
+            self.vae = VQGanVAE()
+        else:
+            with open(self.params.vae_config_fpath) as reader:
+                experiment_configuration = Namespace(**json.load(reader))
+                model_class = get_model_class(experiment_configuration, False)
+                experiment_configuration.use_horovod = False
+                model = model_class(experiment_configuration)
+                self.vae = model.model
+                weights = torch.load(self.params.vae_weights_fpath)['weights']
+                self.vae.load_state_dict(weights)
 
         self.model = DALLE_MODEL(
             vae=self.vae,
@@ -64,14 +68,16 @@ class DALLE(ABC):
         self.optimizer = self.get_optimizer()
 
     def train(self, dataset):
+        sampler = None
         if self.params.use_horovod:
             sampler = torch.utils.data.DistributedSampler(dataset, num_replicas=hvd.size(), rank=hvd.rank())
-            data_loader = DataLoader(dataset,
-                                     batch_size=self.params.batch_size,
-                                     sampler=sampler,
-                                     num_workers=self.params.num_workers)
-        else:
-            data_loader = DataLoader(dataset, batch_size=self.params.batch_size, num_workers=self.params.num_workers)
+
+        data_loader = DataLoader(dataset,
+                                 batch_size=self.params.batch_size,
+                                 sampler=sampler,
+                                 num_workers=self.params.num_workers,
+                                 prefetch_factor=self.params.prefetch_factor,
+                                 shuffle=True)
 
         step = 0
         exp_config = vars(self.params)
@@ -83,11 +89,21 @@ class DALLE(ABC):
                 config=exp_config
             )
 
+        cached = False
         for epoch in range(self.params.epochs):
             if self.params.use_horovod:
                 sampler.set_epoch(epoch)
             logging.info(f'Starting epoch {epoch}')
             for i, data in enumerate(data_loader):
+                '''
+                This starts the data loader and the caching process. Main training process sleeps for cache_duration 
+                seconds. Thus, allowing the data loader processes to cache samples from the web.
+                '''
+                if not cached:
+                    logging.info('Caching data...')
+                    time.sleep(self.params.cache_duration)
+                    cached = True
+                    logging.info('Caching data done')
                 images = data['image'].cuda()
                 captions = data['caption'].cuda()
                 masks = data['mask'].cuda()
@@ -104,10 +120,10 @@ class DALLE(ABC):
                 if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
                     logs = self.log_train(loss, captions, masks, dataset.tokenizer, i, epoch)
                     wandb.log(logs)
-                    pass
 
                 step += 1
             logging.info(f'Finished epoch {epoch}')
+            cached = False
 
         if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
             wandb.save(f'{self.params.experiment_dpath}/*')
@@ -130,7 +146,7 @@ class DALLE(ABC):
 
     def log_train(self, loss, train_texts, train_masks, tokenizer, step, epoch):
         logs = {}
-        if step % self.params.log_tier2_interval == 0:
+        if step != 0 and step % self.params.log_tier2_interval == 0:
             sample_text = train_texts[:1]
             token_list = sample_text.masked_select(sample_text != 0).tolist()
             decoded_text = tokenizer.decode(token_list)
@@ -147,7 +163,7 @@ class DALLE(ABC):
                 'image': wandb.Image(image, caption=decoded_text)
             }
 
-        if step % self.params.log_tier1_interval == 0:
+        if step != 0 and step % self.params.log_tier1_interval == 0:
             logging.info(f'Epoch:{epoch} Step:{step} loss:{loss.item()}')
             logs = {
                 **logs,
@@ -156,7 +172,7 @@ class DALLE(ABC):
                 'loss': loss.item()
             }
 
-        if step % self.params.save_interval == 0:
+        if step != 0 and step % self.params.save_interval == 0:
             if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
                 save_obj = {
                     'weights': self.model.state_dict()

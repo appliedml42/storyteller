@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 from argparse import Namespace
 
@@ -20,6 +21,7 @@ class ConceptualCaptionsWeb(Dataset):
                 self.parser.add_argument('--dpath', type=str, required=True)
                 self.parser.add_argument('--image_size', type=int, required=True)
                 self.parser.add_argument('--text_seq_len', type=int, required=True)
+                self.parser.add_argument('--gen_logs', action='store_true', default=False)
             self.params, _ = self.parser.parse_known_args(other_args, namespace=generic_args)
             self.params.vocab_size = tokenizer.vocab_size
             self._initialize()
@@ -66,7 +68,6 @@ class ConceptualCaptionsWeb(Dataset):
         caption = self.dataset.iloc[idx, 1]
         img_url = self.dataset.iloc[idx, 2]
         img = ConceptualCaptionsWeb._download_image(img_url)
-
         # If retrieval of image from original index failed replace with random sample.
         while img is None:
             img = ConceptualCaptionsWeb._download_image(img_url)
@@ -76,6 +77,8 @@ class ConceptualCaptionsWeb(Dataset):
 
         img = self.transform(img)
         caption = self._tokenize(caption).squeeze(0)
+        if self.params.gen_logs:
+            logging.info(f'idx:{idx} url:{img_url}')
         return {
             'image': img,
             'caption': caption,

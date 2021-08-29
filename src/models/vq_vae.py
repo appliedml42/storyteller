@@ -1,6 +1,7 @@
 import argparse
 import logging
 import math
+import time
 from abc import ABC
 from argparse import Namespace
 
@@ -34,6 +35,8 @@ class VQ_VAE(ABC):
                 self.parser.add_argument('--temp_min', type=float, required=True)
                 self.parser.add_argument('--anneal_rate', type=float, required=True)
                 self.parser.add_argument('--num_workers', type=int, required=True)
+                self.parser.add_argument('--prefetch_factor', type=int, required=True)
+                self.parser.add_argument('--cache_duration', type=int, required=True)
                 self.parser.add_argument('--log_tier1_interval', type=int, required=True)
                 self.parser.add_argument('--log_tier2_interval', type=int, required=True)
                 self.parser.add_argument('--save_interval', type=int, required=True)
@@ -60,14 +63,15 @@ class VQ_VAE(ABC):
         self.optimizer, self.schedule = self.get_optimizer()
 
     def train(self, dataset):
+        sampler = None
         if self.params.use_horovod:
             sampler = torch.utils.data.DistributedSampler(dataset, num_replicas=hvd.size(), rank=hvd.rank())
-            data_loader = DataLoader(dataset,
-                                     batch_size=self.params.batch_size,
-                                     sampler=sampler,
-                                     num_workers=self.params.num_workers)
-        else:
-            data_loader = DataLoader(dataset, batch_size=self.params.batch_size, num_workers=self.params.num_workers)
+        data_loader = DataLoader(dataset,
+                                 batch_size=self.params.batch_size,
+                                 sampler=sampler,
+                                 num_workers=self.params.num_workers,
+                                 prefetch_factor=self.params.prefetch_factor,
+                                 shuffle=True)
 
         step = 0
         temp = self.params.starting_temp
@@ -80,11 +84,19 @@ class VQ_VAE(ABC):
                 config=exp_config
             )
 
+        cached = False
         for epoch in range(self.params.epochs):
             if self.params.use_horovod:
                 sampler.set_epoch(epoch)
             logging.info(f'Starting epoch {epoch}')
             for i, data in enumerate(data_loader):
+                '''
+                This starts the data loader and the caching process. Main training process sleeps for cache_duration 
+                seconds. Thus, allowing the data loader processes to cache samples from the web.
+                '''
+                if not cached:
+                    time.sleep(self.params.cache_duration)
+                    cached = True
                 images = data['image'].cuda()
                 loss, recons = self.model(images, return_loss=True, return_recons=True, temp=temp)
                 self.optimizer.zero_grad()
@@ -99,6 +111,7 @@ class VQ_VAE(ABC):
 
                 step += 1
             logging.info(f'Finished epoch {epoch}')
+            cached = False
 
         if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
             wandb.save(f'{self.params.experiment_dpath}/*')
