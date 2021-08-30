@@ -119,9 +119,7 @@ class DALLE(ABC):
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
-                    logs = self.log_train(loss, captions, masks, dataset.tokenizer, i, epoch)
-                    wandb.log(logs)
+                self.log_train(loss, captions, masks, dataset.tokenizer, i, epoch)
 
                 step += 1
             logging.info(f'Finished epoch {epoch}')
@@ -149,30 +147,35 @@ class DALLE(ABC):
     def log_train(self, loss, train_texts, train_masks, tokenizer, step, epoch):
         logs = {}
         if step != 0 and step % self.params.log_tier2_interval == 0:
-            sample_text = train_texts[:1]
-            token_list = sample_text.masked_select(sample_text != 0).tolist()
-            decoded_text = tokenizer.decode(token_list)
+            logging.info(f'Sleeping for {int(0.75 * self.params.cache_duration)} secs to cache data.')
+            time.sleep(int(0.75 * self.params.cache_duration))
+            logging.info('Caching data done')
 
-            with torch.no_grad():
+            if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
+                sample_text = train_texts[:1]
+                token_list = sample_text.masked_select(sample_text != 0).tolist()
+                decoded_text = tokenizer.decode(token_list)
+
                 image = self.model.generate_images(
                     sample_text,
                     mask=train_masks[:1],
                     filter_thres=0.9
                 )
 
-            logs = {
-                **logs,
-                'image': wandb.Image(image, caption=decoded_text)
-            }
+                logs = {
+                    **logs,
+                    'image': wandb.Image(image, caption=decoded_text)
+                }
 
         if step != 0 and step % self.params.log_tier1_interval == 0:
-            logging.info(f'Epoch:{epoch} Step:{step} loss:{loss.item()}')
-            logs = {
-                **logs,
-                'epoch': epoch,
-                'step': step,
-                'loss': loss.item()
-            }
+            if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
+                logging.info(f'Epoch:{epoch} Step:{step} loss:{loss.item()}')
+                logs = {
+                    **logs,
+                    'epoch': epoch,
+                    'step': step,
+                    'loss': loss.item()
+                }
 
         if step != 0 and step % self.params.save_interval == 0:
             if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
@@ -181,4 +184,5 @@ class DALLE(ABC):
                 }
                 torch.save(save_obj, f'{self.params.experiment_dpath}/vae_{epoch}_{step}.pt')
 
-        return logs
+        if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
+            wandb.log(logs)
