@@ -48,14 +48,11 @@ class ConceptualCaptionsWeb(Dataset):
 
     @staticmethod
     def _download_image(url):
-        try:
-            with requests.get(url, timeout=2, stream=True) as response:
-                if response.status_code == 200:
-                    return Image.open(response.raw)
-                else:
-                    return None
-        except Exception as e:
-            return None
+        with requests.get(url, timeout=2, stream=True) as response:
+            if response.status_code == 200:
+                return Image.open(response.raw)
+            else:
+                return None
 
     def _tokenize(self, text):
         return tokenizer.tokenize(text,
@@ -65,20 +62,25 @@ class ConceptualCaptionsWeb(Dataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
+        img = None
         caption = self.dataset.iloc[idx, 1]
         img_url = self.dataset.iloc[idx, 2]
-        img = ConceptualCaptionsWeb._download_image(img_url)
-        # If retrieval of image from original index failed replace with random sample.
         while img is None:
-            img = ConceptualCaptionsWeb._download_image(img_url)
-            rand_sample = self.dataset.sample()
-            caption = rand_sample['caption'].values[0]
-            img_url = rand_sample['url'].values[0]
+            try:
+                img = ConceptualCaptionsWeb._download_image(img_url)
+                img = self.transform(img)
+                caption = self._tokenize(caption).squeeze(0)
+            except Exception as e:
+                img = None
+                rand_sample = self.dataset.sample()
+                caption = rand_sample['caption'].values[0]
+                img_url = rand_sample['url'].values[0]
+                if self.params.gen_logs:
+                    logging.error(e)
 
-        img = self.transform(img)
-        caption = self._tokenize(caption).squeeze(0)
         if self.params.gen_logs:
             logging.info(f'idx:{idx} url:{img_url}')
+
         return {
             'image': img,
             'caption': caption,

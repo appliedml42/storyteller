@@ -34,6 +34,8 @@ class DALLE(ABC):
             self.parser.add_argument('--num_workers', type=int, required=True)
             self.parser.add_argument('--prefetch_factor', type=int, required=True)
             self.parser.add_argument('--cache_duration', type=int, required=True)
+            self.parser.add_argument('--attn_types', type=str, required=True)
+            self.parser.add_argument('--loss_img_weight', type=int, required=True)
             self.parser.add_argument('--log_tier1_interval', type=int, required=True)
             self.parser.add_argument('--log_tier2_interval', type=int, required=True)
             self.parser.add_argument('--save_interval', type=int, required=True)
@@ -60,7 +62,9 @@ class DALLE(ABC):
             depth=self.params.depth,
             heads=self.params.heads,
             dim_head=self.params.dim_head,
-            reversible=self.params.reversible
+            reversible=self.params.reversible,
+            loss_img_weight=self.params.loss_img_weight,
+            attn_types=self.params.attn_types
         ).cuda()
 
         if self.params.use_horovod:
@@ -147,8 +151,8 @@ class DALLE(ABC):
     def log_train(self, loss, train_texts, train_masks, tokenizer, step, epoch):
         logs = {}
         if step != 0 and step % self.params.log_tier2_interval == 0:
-            logging.info(f'Sleeping for {int(0.75 * self.params.cache_duration)} secs to cache data.')
-            time.sleep(int(0.75 * self.params.cache_duration))
+            logging.info(f'Sleeping for {self.params.cache_duration} secs to cache data.')
+            time.sleep(self.params.cache_duration)
             logging.info('Caching data done')
 
             if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
@@ -158,7 +162,6 @@ class DALLE(ABC):
 
                 image = self.model.generate_images(
                     sample_text,
-                    mask=train_masks[:1],
                     filter_thres=0.9
                 )
 
