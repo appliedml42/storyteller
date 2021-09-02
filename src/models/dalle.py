@@ -13,8 +13,9 @@ from dalle_pytorch import VQGanVAE
 from torch.nn.utils import clip_grad_norm
 from torch.optim import Adam
 from torch.utils.data import DataLoader
-
-from common.utils import get_model_class
+from torchvision.utils import save_image, make_grid
+from einops import repeat
+from common.utils import get_model_class, get_dataset_class
 
 
 class DALLE(ABC):
@@ -39,8 +40,13 @@ class DALLE(ABC):
             self.parser.add_argument('--log_tier1_interval', type=int, required=True)
             self.parser.add_argument('--log_tier2_interval', type=int, required=True)
             self.parser.add_argument('--save_interval', type=int, required=True)
-
-        self.params, _ = self.parser.parse_known_args(other_args, namespace=generic_args)
+            self.params, _ = self.parser.parse_known_args(other_args, namespace=generic_args)
+        elif generic_args.which == 'use' and generic_args.method == 'generate_images':
+            self.parser.add_argument('--prompt', type=str, required=True)
+            self.parser.add_argument('--weights_fpath', type=str, required=True)
+            self.parser.add_argument('--num_images', type=int, required=True)
+            self.params, _ = self.parser.parse_known_args(other_args, namespace=generic_args)
+            self.params.use_horovod = False
 
         if self.params.vae_config_fpath is None:
             self.vae = VQGanVAE()
@@ -70,6 +76,10 @@ class DALLE(ABC):
         if self.params.use_horovod:
             hvd.broadcast_parameters(self.model.state_dict(), root_rank=0)
         self.optimizer = self.get_optimizer()
+
+        if 'weights_fpath' in vars(self.params):
+            weights = torch.load(self.params.weights_fpath)['weights']
+            self.model.load_state_dict(weights)
 
     def train(self, dataset):
         sampler = None
@@ -119,6 +129,7 @@ class DALLE(ABC):
                                   return_loss=True)
 
                 loss.backward()
+
                 clip_grad_norm(self.model.parameters(), self.params.clip_grad_norm)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
@@ -136,7 +147,7 @@ class DALLE(ABC):
 
     def get_optimizer(self):
         if self.params.use_horovod:
-            optimizer = Adam(self.model.parameters(), lr=hvd.size()*self.params.learning_rate)
+            optimizer = Adam(self.model.parameters(), lr=hvd.size() * self.params.learning_rate)
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
             optimizer = hvd.DistributedOptimizer(optimizer,
                                                  named_parameters=self.model.named_parameters(),
@@ -185,7 +196,19 @@ class DALLE(ABC):
                 save_obj = {
                     'weights': self.model.state_dict()
                 }
-                torch.save(save_obj, f'{self.params.experiment_dpath}/vae_{epoch}_{step}.pt')
+                torch.save(save_obj, f'{self.params.experiment_dpath}/dalle_{epoch}_{step}.pt')
 
         if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
             wandb.log(logs)
+
+    def generate_images(self):
+        dataset_class = get_dataset_class(self.params)
+        dataset = dataset_class(self.params)
+        text = dataset.tokenize(self.params.prompt).cuda()
+        text = repeat(text, '() n -> b n', b=self.params.num_images)
+        images = self.model.generate_images(
+                text,
+                filter_thres=0.9
+            )
+        images = make_grid(images, nrow=int(self.params.num_images/5))
+        save_image(images, f'{"_".join(self.params.prompt.lower().split())}.jpeg')

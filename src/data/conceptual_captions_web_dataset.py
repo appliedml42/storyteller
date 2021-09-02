@@ -54,7 +54,7 @@ class ConceptualCaptionsWeb(Dataset):
             else:
                 return None
 
-    def _tokenize(self, text):
+    def tokenize(self, text):
         return tokenizer.tokenize(text,
                                   self.params.text_seq_len)
 
@@ -69,7 +69,7 @@ class ConceptualCaptionsWeb(Dataset):
             try:
                 img = ConceptualCaptionsWeb._download_image(img_url)
                 img = self.transform(img)
-                caption = self._tokenize(caption).squeeze(0)
+                caption = self.tokenize(caption).squeeze(0)
             except Exception as e:
                 img = None
                 rand_sample = self.dataset.sample()
