@@ -5,25 +5,27 @@ import time
 from abc import ABC
 from argparse import Namespace
 
-import horovod.torch as hvd
 import torch
 import wandb
 from dalle_pytorch import DALLE as DALLE_MODEL
 from dalle_pytorch import VQGanVAE
+from einops import repeat
 from torch.nn.utils import clip_grad_norm
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image, make_grid
-from einops import repeat
+import horovod.torch as hvd
 from common.utils import get_model_class, get_dataset_class
 
 
 class DALLE(ABC):
     def __init__(self, generic_args, other_args):
+
         self.parser = argparse.ArgumentParser()
         if generic_args.which == 'train':
             self.parser.add_argument('--vae_config_fpath', type=str, required=False, default=None)
             self.parser.add_argument('--vae_weights_fpath', type=str, required=False, default=None)
+            self.parser.add_argument('--vae_type', type=str, required=True, choices=['vqgan', 'vqvae'])
             self.parser.add_argument('--batch_size', type=int, required=True)
             self.parser.add_argument('--learning_rate', type=float, required=True)
             self.parser.add_argument('--dim', type=int, required=True)
@@ -31,10 +33,10 @@ class DALLE(ABC):
             self.parser.add_argument('--heads', type=int, required=True)
             self.parser.add_argument('--dim_head', type=int, required=True)
             self.parser.add_argument('--reversible', default=False, action='store_true')
-            self.parser.add_argument('--clip_grad_norm', type=float, required=True)
+            self.parser.add_argument('--clip_grad_norm', type=float, required=False, default=None)
             self.parser.add_argument('--num_workers', type=int, required=True)
-            self.parser.add_argument('--prefetch_factor', type=int, required=True)
-            self.parser.add_argument('--cache_duration', type=int, required=True)
+            self.parser.add_argument('--prefetch_factor', type=int, required=False, default=2)
+            self.parser.add_argument('--cache_duration', type=int, required=False)
             self.parser.add_argument('--attn_types', type=str, required=True)
             self.parser.add_argument('--loss_img_weight', type=int, required=True)
             self.parser.add_argument('--log_tier1_interval', type=int, required=True)
@@ -48,9 +50,10 @@ class DALLE(ABC):
             self.params, _ = self.parser.parse_known_args(other_args, namespace=generic_args)
             self.params.use_horovod = False
 
-        if self.params.vae_config_fpath is None:
-            self.vae = VQGanVAE()
-        else:
+        if self.params.vae_type == 'vqgan':
+            self.vae = VQGanVAE(vqgan_model_path=self.params.vae_weights_fpath,
+                                vqgan_config_path=self.params.vae_config_fpath)
+        elif self.params.vae_type == 'vqvae':
             with open(self.params.vae_config_fpath) as reader:
                 experiment_configuration = Namespace(**json.load(reader))
                 model_class = get_model_class(experiment_configuration, False)
@@ -70,7 +73,7 @@ class DALLE(ABC):
             dim_head=self.params.dim_head,
             reversible=self.params.reversible,
             loss_img_weight=self.params.loss_img_weight,
-            attn_types=self.params.attn_types
+            attn_types=tuple(self.params.attn_types.split(','))
         ).cuda()
 
         if self.params.use_horovod:
@@ -106,6 +109,7 @@ class DALLE(ABC):
             )
 
         cached = False
+        scaler = torch.cuda.amp.GradScaler(enabled=True)
         for epoch in range(self.params.epochs):
             if self.params.use_horovod:
                 sampler.set_epoch(epoch)
@@ -115,7 +119,7 @@ class DALLE(ABC):
                 This starts the data loader and the caching process. Main training process sleeps for cache_duration 
                 seconds. Thus, allowing the data loader processes to cache samples from the web.
                 '''
-                if not cached:
+                if self.params.cache_duration is not None and not cached:
                     logging.info('Caching data...')
                     time.sleep(self.params.cache_duration)
                     cached = True
@@ -123,18 +127,20 @@ class DALLE(ABC):
                 images = data['image'].cuda()
                 captions = data['caption'].cuda()
                 masks = data['mask'].cuda()
-                loss = self.model(captions,
-                                  images,
-                                  mask=masks,
-                                  return_loss=True)
-
-                loss.backward()
-
-                clip_grad_norm(self.model.parameters(), self.params.clip_grad_norm)
-                self.optimizer.step()
+                with torch.cuda.amp.autocast(enabled=True):
+                    loss = self.model(captions,
+                                      images,
+                                      mask=masks,
+                                      return_loss=True)
+                scaler.scale(loss).backward()
+                if self.params.clip_grad_norm is not None:
+                    scaler.unscale_(self.optimizer)
+                    clip_grad_norm(self.model.parameters(), self.params.clip_grad_norm)
+                scaler.step(self.optimizer)
+                scaler.update()
                 self.optimizer.zero_grad()
 
-                self.log_train(loss, captions, masks, dataset.tokenizer, i, epoch)
+                self.log_train(loss, images, captions, dataset.tokenizer, i, epoch)
 
                 step += 1
             logging.info(f'Finished epoch {epoch}')
@@ -159,17 +165,19 @@ class DALLE(ABC):
 
         return optimizer
 
-    def log_train(self, loss, train_texts, train_masks, tokenizer, step, epoch):
+    def log_train(self, loss, train_images, train_texts, tokenizer, step, epoch):
         logs = {}
         if step != 0 and step % self.params.log_tier2_interval == 0:
-            logging.info(f'Sleeping for {self.params.cache_duration} secs to cache data.')
-            time.sleep(self.params.cache_duration)
-            logging.info('Caching data done')
+            if self.params.cache_duration is not None:
+                logging.info(f'Sleeping for {self.params.cache_duration} secs to cache data.')
+                time.sleep(self.params.cache_duration)
+                logging.info('Caching data done')
 
             if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
                 sample_text = train_texts[:1]
                 token_list = sample_text.masked_select(sample_text != 0).tolist()
-                decoded_text = tokenizer.decode(token_list)
+                decoded_text = tokenizer.decode(token_list, pad_tokens=set())
+                codes = self.model
 
                 image = self.model.generate_images(
                     sample_text,
@@ -178,7 +186,8 @@ class DALLE(ABC):
 
                 logs = {
                     **logs,
-                    'image': wandb.Image(image, caption=decoded_text)
+                    'sampled_image': wandb.Image(train_images[:1], caption=decoded_text),
+                    'generated_image': wandb.Image(image, caption=decoded_text)
                 }
 
         if step != 0 and step % self.params.log_tier1_interval == 0:
@@ -196,7 +205,7 @@ class DALLE(ABC):
                 save_obj = {
                     'weights': self.model.state_dict()
                 }
-                torch.save(save_obj, f'{self.params.experiment_dpath}/dalle_{epoch}_{step}.pt')
+                torch.save(save_obj, f'{self.params.experiment_dpath}/dalle.pt')
 
         if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
             wandb.log(logs)
@@ -207,8 +216,8 @@ class DALLE(ABC):
         text = dataset.tokenize(self.params.prompt).cuda()
         text = repeat(text, '() n -> b n', b=self.params.num_images)
         images = self.model.generate_images(
-                text,
-                filter_thres=0.9
-            )
-        images = make_grid(images, nrow=int(self.params.num_images/5))
+            text,
+            filter_thres=0.9
+        )
+        images = make_grid(images, nrow=int(self.params.num_images / 5))
         save_image(images, f'{"_".join(self.params.prompt.lower().split())}.jpeg')

@@ -2,6 +2,7 @@
 Script to for training and evaluation.
 """
 import argparse
+import collections.abc as container_abcs
 import json
 import logging
 import os

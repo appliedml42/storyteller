@@ -4,7 +4,6 @@ import math
 import time
 from abc import ABC
 from argparse import Namespace
-
 import horovod.torch as hvd
 import torch
 import wandb
@@ -120,7 +119,7 @@ class VQ_VAE(ABC):
 
     def get_optimizer(self):
         if self.params.use_horovod:
-            optimizer = Adam(self.model.parameters(), lr=hvd.size()*self.params.learning_rate)
+            optimizer = Adam(self.model.parameters(), lr=hvd.size() * self.params.learning_rate)
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
             optimizer = hvd.DistributedOptimizer(optimizer,
                                                  named_parameters=self.model.named_parameters(),
@@ -142,7 +141,8 @@ class VQ_VAE(ABC):
             images, recons = train_images[:self.params.num_images_save], recons[:self.params.num_images_save]
             images, recons, hard_recons, codes = map(lambda t: t.detach().cpu(), (images, recons, hard_recons, codes))
             images, recons, hard_recons = map(
-                lambda t: make_grid(t.float(), nrow=int(math.sqrt(self.params.num_images_save)), normalize=True, range=(-1, 1)),
+                lambda t: make_grid(t.float(), nrow=int(math.sqrt(self.params.num_images_save)), normalize=True,
+                                    range=(-1, 1)),
                 (images, recons, hard_recons))
 
             logs = {
