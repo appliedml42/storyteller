@@ -42,6 +42,7 @@ class DALLE(ABC):
             self.parser.add_argument('--log_tier1_interval', type=int, required=True)
             self.parser.add_argument('--log_tier2_interval', type=int, required=True)
             self.parser.add_argument('--save_interval', type=int, required=True)
+            self.parser.add_argument('--weights_fpath', type=str, required=False, default=None)
             self.params, _ = self.parser.parse_known_args(other_args, namespace=generic_args)
         elif generic_args.which == 'use' and generic_args.method == 'generate_images':
             self.parser.add_argument('--prompt', type=str, required=True)
@@ -80,7 +81,7 @@ class DALLE(ABC):
             hvd.broadcast_parameters(self.model.state_dict(), root_rank=0)
         self.optimizer = self.get_optimizer()
 
-        if 'weights_fpath' in vars(self.params):
+        if 'weights_fpath' in vars(self.params) and self.params.weights_fpath is not None:
             weights = torch.load(self.params.weights_fpath)['weights']
             self.model.load_state_dict(weights)
 
@@ -119,6 +120,7 @@ class DALLE(ABC):
                 This starts the data loader and the caching process. Main training process sleeps for cache_duration 
                 seconds. Thus, allowing the data loader processes to cache samples from the web.
                 '''
+                self.optimizer.zero_grad()
                 if self.params.cache_duration is not None and not cached:
                     logging.info('Caching data...')
                     time.sleep(self.params.cache_duration)
@@ -133,17 +135,24 @@ class DALLE(ABC):
                                       mask=masks,
                                       return_loss=True)
                 scaler.scale(loss).backward()
+
                 if self.params.clip_grad_norm is not None:
                     scaler.unscale_(self.optimizer)
                     clip_grad_norm(self.model.parameters(), self.params.clip_grad_norm)
-                scaler.step(self.optimizer)
-                scaler.update()
-                self.optimizer.zero_grad()
+
+                self.optimizer.synchronize()
+                with self.optimizer.skip_synchronize():
+                    scaler.step(self.optimizer)
+                    scaler.update()
 
                 self.log_train(loss, images, captions, dataset.tokenizer, i, epoch)
-
                 step += 1
             logging.info(f'Finished epoch {epoch}')
+            if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
+                save_obj = {
+                    'weights': self.model.state_dict()
+                }
+                torch.save(save_obj, f'{self.params.experiment_dpath}/dalle.pt')
             cached = False
 
         if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
@@ -177,7 +186,6 @@ class DALLE(ABC):
                 sample_text = train_texts[:1]
                 token_list = sample_text.masked_select(sample_text != 0).tolist()
                 decoded_text = tokenizer.decode(token_list, pad_tokens=set())
-                codes = self.model
 
                 image = self.model.generate_images(
                     sample_text,
@@ -199,13 +207,6 @@ class DALLE(ABC):
                     'step': step,
                     'loss': loss.item()
                 }
-
-        if step != 0 and step % self.params.save_interval == 0:
-            if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
-                save_obj = {
-                    'weights': self.model.state_dict()
-                }
-                torch.save(save_obj, f'{self.params.experiment_dpath}/dalle.pt')
 
         if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
             wandb.log(logs)
