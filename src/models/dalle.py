@@ -147,7 +147,7 @@ class DALLE(ABC):
                     scaler.step(self.optimizer)
                     scaler.update()
 
-                self.log_train(loss, images, captions, dataset.tokenizer, i, epoch)
+                self.log_train(loss, images, captions, dataset.tokenizer, i, step, epoch)
                 step += 1
             logging.info(f'Finished epoch {epoch}')
             if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
@@ -176,9 +176,9 @@ class DALLE(ABC):
 
         return optimizer
 
-    def log_train(self, loss, train_images, train_texts, tokenizer, step, epoch):
+    def log_train(self, loss, train_images, train_texts, tokenizer, local_step, global_step, epoch):
         logs = {}
-        if step != 0 and step % self.params.log_tier2_interval == 0:
+        if global_step != 0 and global_step % self.params.log_tier2_interval == 0:
             if self.params.cache_duration is not None:
                 logging.info(f'Sleeping for {self.params.cache_duration} secs to cache data.')
                 time.sleep(self.params.cache_duration)
@@ -200,13 +200,13 @@ class DALLE(ABC):
                     'generated_image': wandb.Image(image, caption=decoded_text)
                 }
 
-        if step != 0 and step % self.params.log_tier1_interval == 0:
+        if global_step != 0 and global_step % self.params.log_tier1_interval == 0:
             if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
-                logging.info(f'Epoch:{epoch} Step:{step} loss:{loss.item()}')
+                logging.info(f'Epoch:{epoch} Step:{global_step} loss:{loss.item()}')
                 logs = {
                     **logs,
                     'epoch': epoch,
-                    'step': step,
+                    'step': local_step,
                     'loss': loss.item()
                 }
 
