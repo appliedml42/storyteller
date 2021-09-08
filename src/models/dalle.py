@@ -74,7 +74,9 @@ class DALLE(ABC):
             dim_head=self.params.dim_head,
             reversible=self.params.reversible,
             loss_img_weight=self.params.loss_img_weight,
-            attn_types=tuple(self.params.attn_types.split(','))
+            attn_types=tuple(self.params.attn_types.split(',')),
+            rotary_emb=False,
+            shift_tokens=False
         ).cuda()
 
         if self.params.use_horovod:
