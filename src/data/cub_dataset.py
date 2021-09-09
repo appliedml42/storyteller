@@ -36,9 +36,6 @@ class CUB(Dataset):
         self.params.vocab_size = self.tokenizer.vocab_size
         self.transform = T.Compose([
             T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
-            T.RandomResizedCrop(self.image_size,
-                                scale=(0.75, 1.),
-                                ratio=(1., 1.)),
             T.ToTensor()
         ])
 

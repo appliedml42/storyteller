@@ -7,6 +7,7 @@ from argparse import Namespace
 
 import torch
 import wandb
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from dalle_pytorch import DALLE as DALLE_MODEL
 from dalle_pytorch import VQGanVAE
 from einops import repeat
@@ -43,6 +44,8 @@ class DALLE(ABC):
             self.parser.add_argument('--log_tier2_interval', type=int, required=True)
             self.parser.add_argument('--save_interval', type=int, required=True)
             self.parser.add_argument('--weights_fpath', type=str, required=False, default=None)
+            self.parser.add_argument('--lr_schedule', choices=['rlop'], required=False, type=str,
+                                     default=None)
             self.params, _ = self.parser.parse_known_args(other_args, namespace=generic_args)
         elif generic_args.which == 'use' and generic_args.method == 'generate_images':
             self.parser.add_argument('--prompt', type=str, required=True)
@@ -81,7 +84,7 @@ class DALLE(ABC):
 
         if self.params.use_horovod:
             hvd.broadcast_parameters(self.model.state_dict(), root_rank=0)
-        self.optimizer = self.get_optimizer()
+        self.optimizer, self.scheduler = self.get_optimizer()
 
         if 'weights_fpath' in vars(self.params) and self.params.weights_fpath is not None:
             weights = torch.load(self.params.weights_fpath)['weights']
@@ -149,6 +152,10 @@ class DALLE(ABC):
 
                 self.log_train(loss, images, captions, dataset.tokenizer, i, step, epoch)
                 step += 1
+
+                if self.scheduler is not None:
+                    self.scheduler.step(loss)
+
             logging.info(f'Finished epoch {epoch}')
             if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
                 save_obj = {
@@ -174,7 +181,20 @@ class DALLE(ABC):
         else:
             optimizer = Adam(self.model.parameters(), lr=self.params.learning_rate)
 
-        return optimizer
+        scheduler = None
+        if self.params.lr_schedule is not None:
+            if self.params.lr_schedule == 'rlop':
+                scheduler = ReduceLROnPlateau(
+                    optimizer,
+                    mode="min",
+                    factor=0.5,
+                    patience=10,
+                    cooldown=10,
+                    min_lr=1e-6,
+                    verbose=True,
+                )
+
+        return optimizer, scheduler
 
     def log_train(self, loss, train_images, train_texts, tokenizer, local_step, global_step, epoch):
         logs = {}
@@ -207,8 +227,10 @@ class DALLE(ABC):
                     **logs,
                     'epoch': epoch,
                     'step': local_step,
-                    'loss': loss.item()
+                    'loss': loss.item(),
                 }
+                if self.scheduler is not None:
+                    logs['lr'] = self.scheduler.get_last_lr()[0]
 
         if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
             wandb.log(logs)
