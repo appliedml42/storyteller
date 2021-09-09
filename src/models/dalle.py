@@ -8,7 +8,7 @@ from argparse import Namespace
 import torch
 import wandb
 from dalle_pytorch import DALLE as DALLE_MODEL
-from dalle_pytorch.vae import VQGanVAE1024 as VQGanVAE
+from dalle_pytorch import VQGanVAE
 from einops import repeat
 from torch.nn.utils import clip_grad_norm
 from torch.optim import Adam
@@ -52,9 +52,8 @@ class DALLE(ABC):
             self.params.use_horovod = False
 
         if self.params.vae_type == 'vqgan':
-            #self.vae = VQGanVAE(vqgan_model_path=self.params.vae_weights_fpath,
-            #                    vqgan_config_path=self.params.vae_config_fpath)
-            self.vae = VQGanVAE()
+            self.vae = VQGanVAE(vqgan_model_path=self.params.vae_weights_fpath,
+                                vqgan_config_path=self.params.vae_config_fpath)
         elif self.params.vae_type == 'vqvae':
             with open(self.params.vae_config_fpath) as reader:
                 experiment_configuration = Namespace(**json.load(reader))
@@ -76,15 +75,12 @@ class DALLE(ABC):
             reversible=self.params.reversible,
             loss_img_weight=self.params.loss_img_weight,
             attn_types=tuple(self.params.attn_types.split(',')),
+            rotary_emb=False,
+            shift_tokens=False
         ).cuda()
 
         if self.params.use_horovod:
-            broadcast_state_dict = {}
-            for key, value in self.model.state_dict().items():
-                if key == 'logits_mask':
-                    continue
-                broadcast_state_dict[key] = value
-            hvd.broadcast_parameters(broadcast_state_dict, root_rank=0)
+            hvd.broadcast_parameters(self.model.state_dict(), root_rank=0)
         self.optimizer = self.get_optimizer()
 
         if 'weights_fpath' in vars(self.params) and self.params.weights_fpath is not None:

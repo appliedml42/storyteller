@@ -1,4 +1,3 @@
 dalle-pytorch==0.7.2
-youtokentome
 wandb
 names
