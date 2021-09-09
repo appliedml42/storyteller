@@ -133,12 +133,10 @@ class DALLE(ABC):
                     logging.info('Caching data done')
                 images = data['image'].cuda()
                 captions = data['caption'].cuda()
-                masks = data['mask'].cuda()
 
                 with torch.cuda.amp.autocast(enabled=True):
                     loss = self.model(captions,
                                       images,
-                                      mask=masks,
                                       return_loss=True)
                 scaler.scale(loss).backward()
 
@@ -159,10 +157,9 @@ class DALLE(ABC):
                 self.log_train(loss, images, captions, dataset.tokenizer, i, step, epoch)
                 step += 1
 
-                if self.scheduler is not None:
-                    self.scheduler.step(loss)
-
             logging.info(f'Finished epoch {epoch}')
+            if self.scheduler is not None:
+                self.scheduler.step(loss)
             if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
                 save_obj = {
                     'weights': self.model.state_dict()
