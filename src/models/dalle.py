@@ -134,6 +134,7 @@ class DALLE(ABC):
                 images = data['image'].cuda()
                 captions = data['caption'].cuda()
                 masks = data['mask'].cuda()
+
                 with torch.cuda.amp.autocast(enabled=True):
                     loss = self.model(captions,
                                       images,
@@ -145,8 +146,13 @@ class DALLE(ABC):
                     scaler.unscale_(self.optimizer)
                     clip_grad_norm(self.model.parameters(), self.params.clip_grad_norm)
 
-                self.optimizer.synchronize()
-                with self.optimizer.skip_synchronize():
+                if self.params.use_horovod:
+                    self.optimizer.synchronize()
+                    with self.optimizer.skip_synchronize():
+                        scaler.step(self.optimizer)
+                        scaler.update()
+                    loss = hvd.allreduce(loss).item()
+                else:
                     scaler.step(self.optimizer)
                     scaler.update()
 
@@ -171,13 +177,13 @@ class DALLE(ABC):
 
     def get_optimizer(self):
         if self.params.use_horovod:
-            optimizer = Adam(self.model.parameters(), lr=hvd.size() * self.params.learning_rate)
+            optimizer = Adam(self.model.parameters(), lr=self.params.learning_rate*hvd.size())
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
             optimizer = hvd.DistributedOptimizer(optimizer,
                                                  named_parameters=self.model.named_parameters(),
                                                  compression=hvd.Compression.fp16,
-                                                 op=hvd.Average,
-                                                 gradient_predivide_factor=1.0)
+                                                 backward_passes_per_step=5,
+                                                 op=hvd.Average)
         else:
             optimizer = Adam(self.model.parameters(), lr=self.params.learning_rate)
 
@@ -223,12 +229,12 @@ class DALLE(ABC):
         if global_step != 0 and global_step % self.params.log_tier1_interval == 0:
             if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
                 lr = self.optimizer.param_groups[0]['lr']
-                logging.info(f'Epoch:{epoch} Step:{global_step} loss:{loss.item()} lr:{lr}')
+                logging.info(f'Epoch:{epoch} Step:{global_step} loss:{loss} lr:{lr}')
                 logs = {
                     **logs,
                     'epoch': epoch,
                     'step': local_step,
-                    'loss': loss.item(),
+                    'loss': loss,
                     'lr': lr
                 }
 
