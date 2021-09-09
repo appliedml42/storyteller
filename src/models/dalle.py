@@ -222,15 +222,16 @@ class DALLE(ABC):
 
         if global_step != 0 and global_step % self.params.log_tier1_interval == 0:
             if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
-                logging.info(f'Epoch:{epoch} Step:{global_step} loss:{loss.item()}')
+                lr = self.scheduler.get_last_lr()[0] if self.scheduler is not None else None
+                logging.info(f'Epoch:{epoch} Step:{global_step} loss:{loss.item()} lr:{lr}')
                 logs = {
                     **logs,
                     'epoch': epoch,
                     'step': local_step,
                     'loss': loss.item(),
                 }
-                if self.scheduler is not None:
-                    logs['lr'] = self.scheduler.get_last_lr()[0]
+                if lr is not None:
+                    logs['lr'] = lr
 
         if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
             wandb.log(logs)
