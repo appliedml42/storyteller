@@ -6,7 +6,7 @@ from argparse import Namespace
 import pandas as pd
 import torch
 from PIL import Image
-from dalle_pytorch.tokenizer import YttmTokenizer
+from common.tokenizers import YttmTokenizer
 from torch.utils.data import Dataset
 from torchvision import transforms as T
 
