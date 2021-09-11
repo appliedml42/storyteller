@@ -156,7 +156,6 @@ class DALLE(ABC):
 
                 self.log_train(loss, images, captions, dataset.tokenizer, i, step, epoch)
                 step += 1
-
             logging.info(f'Finished epoch {epoch}')
             if self.scheduler is not None:
                 self.scheduler.step(loss)
@@ -165,11 +164,9 @@ class DALLE(ABC):
                     'weights': self.model.state_dict()
                 }
                 torch.save(save_obj, f'{self.params.experiment_dpath}/dalle.pt')
+                if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
+                    wandb.save(f'{self.params.experiment_dpath}/*')
             cached = False
-
-        if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
-            wandb.save(f'{self.params.experiment_dpath}/*')
-
         wandb.finish()
 
     def get_optimizer(self):
