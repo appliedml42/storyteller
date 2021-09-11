@@ -44,8 +44,7 @@ class DALLE(ABC):
             self.parser.add_argument('--log_tier2_interval', type=int, required=True)
             self.parser.add_argument('--save_interval', type=int, required=True)
             self.parser.add_argument('--weights_fpath', type=str, required=False, default=None)
-            self.parser.add_argument('--lr_schedule', choices=['rlop'], required=False, type=str,
-                                     default=None)
+            self.parser.add_argument('--lr_schedule', choices=['rlop', 'nos'], required=True, type=str)
             self.params, _ = self.parser.parse_known_args(other_args, namespace=generic_args)
         elif generic_args.which == 'use' and generic_args.method == 'generate_images':
             self.parser.add_argument('--prompt', type=str, required=True)
@@ -163,7 +162,7 @@ class DALLE(ABC):
 
     def get_optimizer(self):
         if self.params.use_horovod:
-            optimizer = Adam(self.model.parameters(), lr=self.params.learning_rate*hvd.size())
+            optimizer = Adam(self.model.parameters(), lr=self.params.learning_rate * hvd.size())
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
             optimizer = hvd.DistributedOptimizer(optimizer,
                                                  named_parameters=self.model.named_parameters(),
@@ -174,17 +173,16 @@ class DALLE(ABC):
             optimizer = Adam(self.model.parameters(), lr=self.params.learning_rate)
 
         scheduler = None
-        if self.params.lr_schedule is not None:
-            if self.params.lr_schedule == 'rlop':
-                scheduler = ReduceLROnPlateau(
-                    optimizer,
-                    mode="min",
-                    factor=0.5,
-                    patience=10,
-                    cooldown=10,
-                    min_lr=1e-6,
-                    verbose=True,
-                )
+        if self.params.lr_schedule == 'rlop':
+            scheduler = ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=0.5,
+                patience=10,
+                cooldown=10,
+                min_lr=1e-6,
+                verbose=True,
+            )
 
         return optimizer, scheduler
 
@@ -200,16 +198,24 @@ class DALLE(ABC):
                 sample_text = train_texts[:1]
                 token_list = sample_text.masked_select(sample_text != 0).tolist()
                 decoded_text = tokenizer.decode(token_list, pad_tokens=set())
+                image = train_images[:1]
 
-                image = self.model.generate_images(
-                    sample_text,
-                    filter_thres=0.9
-                )
+                with torch.no_grad():
+                    codes = self.model.vae.get_codebook_indices(train_images[:1])
+                    vae_reconstruction = self.model.vae.decode(codes)
+                    dalle_reconstruction = self.model.generate_images(sample_text, filter_thres=0.9)
+                image, codes, vae_reconstruction, dalle_reconstruction = map(lambda t: t.detach().cpu(),
+                                                                             (image,
+                                                                              codes,
+                                                                              vae_reconstruction,
+                                                                              dalle_reconstruction))
 
                 logs = {
                     **logs,
-                    'sampled_image': wandb.Image(train_images[:1], caption=decoded_text),
-                    'generated_image': wandb.Image(image, caption=decoded_text)
+                    'codebook_indices': wandb.Histogram(codes),
+                    'orig_image': wandb.Image(image, caption=decoded_text),
+                    'vae_recon': wandb.Image(vae_reconstruction, caption='VAE reconstruction'),
+                    'dalle_recon': wandb.Image(dalle_reconstruction, caption='DALLE reconstruction'),
                 }
 
         if global_step != 0 and global_step % self.params.log_tier1_interval == 0:
