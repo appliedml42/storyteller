@@ -138,6 +138,7 @@ class DALLE(ABC):
                                   images,
                                   return_loss=True)
                 loss.backward()
+                self.optimizer.step()
 
                 if self.params.clip_grad_norm is not None:
                     clip_grad_norm(self.model.parameters(), self.params.clip_grad_norm)
