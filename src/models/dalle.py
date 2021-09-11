@@ -10,6 +10,7 @@ import wandb
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from dalle_pytorch import DALLE as DALLE_MODEL
 from dalle_pytorch import VQGanVAE
+from dalle_pytorch.dalle_pytorch import set_requires_grad
 from einops import repeat
 from torch.nn.utils import clip_grad_norm
 from torch.optim import Adam
@@ -81,6 +82,9 @@ class DALLE(ABC):
             rotary_emb=False,
             shift_tokens=False
         ).cuda()
+        # Force VAE to be trained as part of DALLE training. This change was added AFTER CUB dataset was reproduced.
+        # Is this what is causing drop in loss but not good generations ?
+        set_requires_grad(self.model.vae, True)
 
         if self.params.use_horovod:
             hvd.broadcast_parameters(self.model.state_dict(), root_rank=0)
@@ -107,6 +111,7 @@ class DALLE(ABC):
         step = 0
         exp_config = vars(self.params)
         exp_config['num_params'] = sum(p.numel() for p in self.model.parameters())
+        exp_config['num_trainable_params'] = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         if (self.params.use_horovod and hvd.rank() == 0) or not self.params.use_horovod:
             run = wandb.init(
                 project='storyteller',
