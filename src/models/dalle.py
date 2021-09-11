@@ -10,7 +10,6 @@ import wandb
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from dalle_pytorch import DALLE as DALLE_MODEL
 from dalle_pytorch import VQGanVAE
-from dalle_pytorch.dalle_pytorch import set_requires_grad
 from einops import repeat
 from torch.nn.utils import clip_grad_norm
 from torch.optim import Adam
@@ -82,9 +81,6 @@ class DALLE(ABC):
             rotary_emb=False,
             shift_tokens=False
         ).cuda()
-        # Force VAE to be trained as part of DALLE training. This change was added AFTER CUB dataset was reproduced.
-        # Is this what is causing drop in loss but not good generations ?
-        set_requires_grad(self.model.vae, True)
 
         if self.params.use_horovod:
             hvd.broadcast_parameters(self.model.state_dict(), root_rank=0)
@@ -120,7 +116,6 @@ class DALLE(ABC):
             )
 
         cached = False
-        scaler = torch.cuda.amp.GradScaler(enabled=True)
         for epoch in range(self.params.epochs):
             if self.params.use_horovod:
                 sampler.set_epoch(epoch)
@@ -139,25 +134,16 @@ class DALLE(ABC):
                 images = data['image'].cuda()
                 captions = data['caption'].cuda()
 
-                with torch.cuda.amp.autocast(enabled=True):
-                    loss = self.model(captions,
-                                      images,
-                                      return_loss=True)
-                scaler.scale(loss).backward()
+                loss = self.model(captions,
+                                  images,
+                                  return_loss=True)
+                loss.backward()
 
                 if self.params.clip_grad_norm is not None:
-                    scaler.unscale_(self.optimizer)
                     clip_grad_norm(self.model.parameters(), self.params.clip_grad_norm)
 
                 if self.params.use_horovod:
-                    self.optimizer.synchronize()
-                    with self.optimizer.skip_synchronize():
-                        scaler.step(self.optimizer)
-                        scaler.update()
                     loss = hvd.allreduce(loss).item()
-                else:
-                    scaler.step(self.optimizer)
-                    scaler.update()
 
                 self.log_train(loss, images, captions, dataset.tokenizer, i, step, epoch)
                 step += 1
