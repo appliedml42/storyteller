@@ -16,7 +16,7 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image, make_grid
 import horovod.torch as hvd
-from common.utils import get_model_class, get_dataset_class
+from common.utils import get_model_class, get_dataset_class, generate_images
 
 
 class DALLE(ABC):
@@ -201,21 +201,23 @@ class DALLE(ABC):
                 image = train_images[:1]
 
                 with torch.no_grad():
-                    codes = self.model.vae.get_codebook_indices(train_images[:1])
-                    vae_reconstruction = self.model.vae.decode(codes)
-                    dalle_reconstruction = self.model.generate_images(sample_text, filter_thres=0.9)
-                image, codes, vae_reconstruction, dalle_reconstruction = map(lambda t: t.detach().cpu(),
+                    vae_codes = self.model.vae.get_codebook_indices(train_images[:1])
+                    vae_reconstruction = self.model.vae.decode(vae_codes)
+                    dalle_reconstruction, dalle_codes = generate_images(sample_text, self.model, filter_thres=0.9)
+                image, vae_codes, vae_reconstruction, dalle_reconstruction, dalle_codes, dalle_orig_reconstruction = map(lambda t: t.detach().cpu(),
                                                                              (image,
-                                                                              codes,
+                                                                              vae_codes,
                                                                               vae_reconstruction,
-                                                                              dalle_reconstruction))
+                                                                              dalle_reconstruction,
+                                                                              dalle_codes))
 
                 logs = {
                     **logs,
-                    'codebook_indices': wandb.Histogram(codes),
+                    'vae_codebook_indices': wandb.Histogram(vae_codes),
+                    'dalle_codebook_indices': wandb.Histogram(dalle_codes),
                     'orig_image': wandb.Image(image, caption=decoded_text),
                     'vae_recon': wandb.Image(vae_reconstruction, caption='VAE reconstruction'),
-                    'dalle_recon': wandb.Image(dalle_reconstruction, caption='DALLE reconstruction'),
+                    'dalle_recon': wandb.Image(dalle_reconstruction, caption='DALLE reconstruction')
                 }
 
         if global_step != 0 and global_step % self.params.log_tier1_interval == 0:
