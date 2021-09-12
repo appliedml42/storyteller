@@ -204,7 +204,7 @@ class DALLE(ABC):
                     vae_codes = self.model.vae.get_codebook_indices(train_images[:1])
                     vae_reconstruction = self.model.vae.decode(vae_codes)
                     dalle_reconstruction, dalle_codes = generate_images(sample_text, self.model, filter_thres=0.9)
-                image, vae_codes, vae_reconstruction, dalle_reconstruction, dalle_codes, dalle_orig_reconstruction = map(lambda t: t.detach().cpu(),
+                image, vae_codes, vae_reconstruction, dalle_reconstruction, dalle_codes = map(lambda t: t.detach().cpu(),
                                                                              (image,
                                                                               vae_codes,
                                                                               vae_reconstruction,
