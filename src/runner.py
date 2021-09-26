@@ -39,12 +39,9 @@ def get_args_parser():
     parser_train.set_defaults(which="train")
 
     parser_classify_users = subparsers.add_parser("use", add_help=False)
-    parser_classify_users.add_argument("--experiment_dpath", type=str, required=False, default=None,
-                                       help="Directory where training artifacts will be stored.")
-    parser_classify_users.add_argument("--method", type=str, required=False, default=None,
-                                       help="Directory where training artifacts will be stored.")
-    parser_classify_users.add_argument("--call_on", type=str, required=False, default=None,
-                                       help="Directory where training artifacts will be stored.")
+    parser_classify_users.add_argument("--experiment_dpath", type=str, required=True)
+    parser_classify_users.add_argument("--method", type=str, required=True)
+    parser_classify_users.add_argument("--call_on", type=str, required=True)
     parser_classify_users.set_defaults(which="use")
 
     return parser
