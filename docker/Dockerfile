@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/pytorch:21.06-py3
+FROM nvcr.io/nvidia/pytorch:21.11-py3
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y sudo poppler-utils curl git gcc vim wget unzip lsb-core software-properties-common
