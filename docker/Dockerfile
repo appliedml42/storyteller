@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/pytorch:21.06-py3
+FROM nvcr.io/nvidia/pytorch:21.11-py3
 
 # Install ubuntu dependencies
 ENV DEBIAN_FRONTEND=noninteractive
